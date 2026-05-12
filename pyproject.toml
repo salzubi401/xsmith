@@ -1,0 +1,46 @@
+[project]
+name = "xsmith"
+version = "0.1.0"
+description = "Curiosity-driven test generation via Claude Agent SDK (CovQValue)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "claude-agent-sdk>=0.0.10",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
+    "typer>=0.12",
+    "httpx>=0.27",
+    "coverage>=7.6",
+    "datasets>=3.0",
+    "anyio>=4.4",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[project.scripts]
+xsmith = "xsmith.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xsmith"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "integration: tests that call external services or real SDKs",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ipykernel>=6.29",
+]
