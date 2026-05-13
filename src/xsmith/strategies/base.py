@@ -1,28 +1,29 @@
-"""GenerationStrategy Protocol — the only contract ExplorationLoop knows."""
+"""Strategy Protocol — the only contract the Explorer knows."""
 
 from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
 from xsmith.agents.base import AgentUsage
-from xsmith.domain.coverage import CoverageMap
+from xsmith.domain.candidate import Candidate
+from xsmith.domain.evaluation import Evaluation
+from xsmith.domain.progress import Progress
 from xsmith.domain.target import Target
-from xsmith.domain.test_case import TestCase, TestResult
 
 
 @runtime_checkable
-class GenerationStrategy(Protocol):
-    """Propose the next TestCase for a target given current state.
+class Strategy(Protocol):
+    """Propose the next Candidate for a target given current state.
 
-    Implementations may consult `coverage` (what's already covered) and
+    Implementations may consult `progress` (which goals are already hit) and
     `history` (what has already been tried, with outcomes). They return one
-    `TestCase` per call, plus telemetry about LLM usage during proposal.
+    `Candidate` per call, plus telemetry about LLM usage during proposal.
     """
 
     async def propose(
         self,
         *,
         target: Target,
-        coverage: CoverageMap,
-        history: list[TestResult],
-    ) -> tuple[TestCase, AgentUsage]: ...
+        progress: Progress,
+        history: list[Evaluation],
+    ) -> tuple[Candidate, AgentUsage]: ...

@@ -6,9 +6,9 @@ the smoke benchmark runs quickly. The loader reads source via `inspect` —
 the listed packages are all installed by `Dockerfile.runner`, and most are
 also commonly present in any modern Python venv.
 
-A target's `source` is the verbatim file text. `branches` is left empty —
-the ExplorationLoop's runner populates it via `discover_branches()` before
-exploration begins (and the smoke-test runner mounts that source into the
+A target's `source` is the verbatim file text. `goals` is left empty —
+the Explorer's evaluator populates it via `enumerate_goals()` before
+exploration begins (and the smoke-test evaluator mounts that source into the
 sandbox).
 """
 

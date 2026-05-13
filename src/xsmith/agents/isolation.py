@@ -26,9 +26,9 @@ def build_options(
 ) -> ClaudeAgentOptions:
     """Return a locked-down `ClaudeAgentOptions` for an in-process MCP server.
 
-    `allowed_tool_names` is the bare tool names (e.g. `["view_coverage",
-    "submit_test"]`). They get namespaced to `mcp__<server>__<name>` so the
-    SDK can route them to our in-process server only.
+    `allowed_tool_names` is the bare tool names (e.g. `["view_progress",
+    "submit_candidate"]`). They get namespaced to `mcp__<server>__<name>` so
+    the SDK can route them to our in-process server only.
     """
     namespaced = [f"mcp__{server_name}__{name}" for name in allowed_tool_names]
     return ClaudeAgentOptions(

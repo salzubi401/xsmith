@@ -17,23 +17,23 @@ class AgentUsageRecord(BaseModel):
     num_turns: int = 0
 
 
-class IterationResult(BaseModel):
+class StepResult(BaseModel):
     iteration: int
     outcome: str
     duration_s: float
-    new_branches: int
-    coverage_after: int
-    coverage_total: int
-    test_rationale: str
-    test_code: str
+    new_goals: int
+    hit_after: int
+    total: int
+    candidate_rationale: str
+    candidate_code: str
     agent_usage: AgentUsageRecord
 
 
 class TargetResult(BaseModel):
     target_id: str
     module_path: str
-    iterations: list[IterationResult] = Field(default_factory=list)
-    final_covered: int = 0
+    steps: list[StepResult] = Field(default_factory=list)
+    final_hit: int = 0
     final_total: int = 0
     final_fraction: float = 0.0
 
@@ -46,25 +46,25 @@ class RunResult(BaseModel):
     model: str
     k: int
     gamma: float
-    exec_budget: int
+    step_budget: int
     targets: list[TargetResult] = Field(default_factory=list)
 
     @property
     def total_cost_usd(self) -> float:
-        return sum(it.agent_usage.cost_usd for t in self.targets for it in t.iterations)
+        return sum(s.agent_usage.cost_usd for t in self.targets for s in t.steps)
 
     @property
     def total_tokens_in(self) -> int:
-        return sum(it.agent_usage.tokens_in for t in self.targets for it in t.iterations)
+        return sum(s.agent_usage.tokens_in for t in self.targets for s in t.steps)
 
     @property
     def total_tokens_out(self) -> int:
-        return sum(it.agent_usage.tokens_out for t in self.targets for it in t.iterations)
+        return sum(s.agent_usage.tokens_out for t in self.targets for s in t.steps)
 
     @property
     def total_cache_read(self) -> int:
-        return sum(it.agent_usage.tokens_cache_read for t in self.targets for it in t.iterations)
+        return sum(s.agent_usage.tokens_cache_read for t in self.targets for s in t.steps)
 
     @property
     def total_cache_creation(self) -> int:
-        return sum(it.agent_usage.tokens_cache_creation for t in self.targets for it in t.iterations)
+        return sum(s.agent_usage.tokens_cache_creation for t in self.targets for s in t.steps)

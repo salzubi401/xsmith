@@ -4,10 +4,10 @@ import os
 
 import pytest
 
-from xsmith.agents.test_generator import TestGeneratorAgent as XTestGeneratorAgent
+from xsmith.agents.generator import GeneratorAgent
 from xsmith.config import load_settings
 from xsmith.domain.target import Target
-from xsmith.execution.subprocess_runner import SubprocessRunner
+from xsmith.execution.subprocess import SubprocessEvaluator
 
 
 SIMPLE_TARGET = """\
@@ -22,7 +22,7 @@ def classify(value):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_real_sdk_generated_test_runs_with_subprocess_runner(monkeypatch):
+async def test_real_sdk_generated_candidate_runs_with_subprocess_evaluator(monkeypatch):
     settings = load_settings()
     api_key = os.environ.get("ANTHROPIC_API_KEY") or settings.ANTHROPIC_API_KEY
     if not api_key:
@@ -34,26 +34,26 @@ async def test_real_sdk_generated_test_runs_with_subprocess_runner(monkeypatch):
         module_path="sample_target",
         source=SIMPLE_TARGET,
     )
-    runner = SubprocessRunner(timeout_s=20)
-    uncovered = await runner.discover_branches(target)
-    assert len(uncovered) > 0
+    evaluator = SubprocessEvaluator(timeout_s=20)
+    missing = await evaluator.enumerate_goals(target)
+    assert len(missing) > 0
 
-    agent = XTestGeneratorAgent(
+    agent = GeneratorAgent(
         variant_idx=0,
         model=os.environ.get("XSMITH_INTEGRATION_MODEL") or settings.MODEL,
         max_turns=6,
     )
-    candidate, _ = await agent.propose(target=target, uncovered=uncovered, history=[])
+    candidate, _ = await agent.propose(target=target, missing=missing, history=[])
 
     assert candidate is not None
     assert candidate.code.strip()
 
-    result = await runner.run(candidate, target)
+    result = await evaluator.evaluate(candidate, target)
 
     assert result.outcome == "pass", (
-        "generated test should pass under SubprocessRunner\n"
+        "generated candidate should pass under SubprocessEvaluator\n"
         f"code:\n{candidate.code}\n"
         f"stdout:\n{result.stdout}\n"
         f"stderr:\n{result.stderr}"
     )
-    assert len(result.branches_covered) > 0
+    assert len(result.goals_hit) > 0

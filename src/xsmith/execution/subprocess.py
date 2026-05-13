@@ -1,4 +1,4 @@
-"""SubprocessRunner — run a generated test locally via `python -m coverage`.
+"""SubprocessEvaluator — run a candidate locally via `python -m coverage`.
 
 Layout written per call into a fresh tempdir:
 
@@ -13,17 +13,17 @@ Then we run:
     python -m coverage run --rcfile=.coveragerc -m pytest tests -q
     python -m coverage json --rcfile=.coveragerc -o coverage.json
 
-…and parse coverage.json into a BranchSet keyed by the relative target path.
+…and parse coverage.json into a `Goals` set keyed by the relative target path.
 
 The Target.module_path's last dotted segment is used as the module filename;
 the leading segments are flattened into a single package (we don't try to
 preserve arbitrary nesting — `foo.bar.baz` is imported as the module `baz`
-inside package `target_pkg`). The generated test must import using the
-`module_path` we tell it, so we rewrite `module_path` references in the test
+inside package `target_pkg`). The generated candidate must import using the
+`module_path` we tell it, so we rewrite `module_path` references in the code
 to `target_pkg.<leaf>` before running.
 
-This is a deliberate simplification: the runner exists for development and
-tests. Real benchmark runs use the Docker runner.
+This is a deliberate simplification: the evaluator exists for development and
+tests. Real benchmark runs use the Docker evaluator.
 """
 
 from __future__ import annotations
@@ -35,10 +35,11 @@ import tempfile
 import time
 from pathlib import Path
 
+from xsmith.domain.candidate import Candidate
+from xsmith.domain.evaluation import Evaluation
+from xsmith.domain.goal import Goals
 from xsmith.domain.target import Target
-from xsmith.domain.test_case import TestCase
-from xsmith.execution.coverage_parser import parse_all_branches, parse_executed_branches
-from xsmith.execution.runner import TestRunResult
+from xsmith.execution.coverage_adapter import parse_all_goals, parse_executed_goals
 
 _COVERAGERC = """\
 [run]
@@ -50,14 +51,14 @@ show_missing = False
 """
 
 
-class SubprocessRunner:
+class SubprocessEvaluator:
     def __init__(self, *, python: str | None = None, timeout_s: float = 30.0):
         self.python = python or sys.executable
         self.timeout_s = timeout_s
 
-    async def run(self, test_case: TestCase, target: Target) -> TestRunResult:
+    async def evaluate(self, candidate: Candidate, target: Target) -> Evaluation:
         leaf = target.module_path.rsplit(".", 1)[-1]
-        rewritten_code = _rewrite_imports(test_case.code, target.module_path, f"target_pkg.{leaf}")
+        rewritten_code = _rewrite_imports(candidate.code, target.module_path, f"target_pkg.{leaf}")
 
         with tempfile.TemporaryDirectory(prefix="xsmith-run-") as tmp:
             root = Path(tmp)
@@ -80,42 +81,39 @@ class SubprocessRunner:
 
             outcome, stdout, stderr, duration = await self._run_pytest(root)
 
-            covered = _BranchSetEmpty()
+            goals_hit = Goals()
             try:
                 cov_json = root / "coverage.json"
                 if cov_json.exists():
                     target_rel = f"target_pkg/{leaf}.py"
-                    covered = parse_executed_branches(
+                    goals_hit = parse_executed_goals(
                         cov_json.read_text(),
                         file_filter={target_rel},
                     )
             except Exception as e:  # noqa: BLE001  surfaced via stderr
-                stderr = f"{stderr}\n[coverage_parser] {e}"
+                stderr = f"{stderr}\n[coverage_adapter] {e}"
 
-            return TestRunResult(
+            return Evaluation(
+                candidate=candidate,
                 outcome=outcome,
                 stdout=stdout,
                 stderr=stderr,
                 duration_s=duration,
-                branches_covered=covered,
+                goals_hit=goals_hit,
             )
 
-    async def discover_branches(self, target: Target):
-        """Run a no-op import-only test and return the *universe* of branches
-        (executed + missing) for the target file.
+    async def enumerate_goals(self, target: Target) -> Goals:
+        """Run a no-op import-only test and return the *universe* of goals
+        (executed + missing branches) for the target file.
 
-        Used by the exploration loop to initialize a CoverageMap's `total`.
+        Used by the exploration loop to initialize Progress.all.
         """
-        from xsmith.domain.coverage import BranchSet
-
         leaf = target.module_path.rsplit(".", 1)[-1]
         import_test = (
             f"import target_pkg.{leaf} as _m\n"
             "def test_import():\n"
             "    assert _m is not None\n"
         )
-        tc = TestCase(code=import_test, rationale="discover branches")
-        # Reuse run() but parse all branches instead of just executed.
         with tempfile.TemporaryDirectory(prefix="xsmith-disc-") as tmp:
             root = Path(tmp)
             pkg = root / "target_pkg"
@@ -135,9 +133,9 @@ class SubprocessRunner:
 
             cov_json = root / "coverage.json"
             if not cov_json.exists():
-                return BranchSet()
+                return Goals()
             target_rel = f"target_pkg/{leaf}.py"
-            return parse_all_branches(cov_json.read_text(), file_filter={target_rel})
+            return parse_all_goals(cov_json.read_text(), file_filter={target_rel})
 
     async def _run_pytest(self, root: Path):
         start = time.monotonic()
@@ -198,12 +196,6 @@ class SubprocessRunner:
         return outcome, stdout, stderr, duration
 
 
-def _BranchSetEmpty():
-    from xsmith.domain.coverage import BranchSet
-
-    return BranchSet()
-
-
 _IMPORT_PATTERNS = [
     # `from <module_path> import ...`
     (re.compile(r"\bfrom\s+{m}\b"), "from {r}"),
@@ -214,7 +206,7 @@ _IMPORT_PATTERNS = [
 
 
 def _rewrite_imports(code: str, original: str, replacement: str) -> str:
-    """Rewrite `module_path` references in a test to point at the sandboxed package.
+    """Rewrite `module_path` references in a candidate to point at the sandboxed package.
 
     Only rewrites `from X import ...` and `import X` head forms — submodule
     references (`X.sub`) are not rewritten because we don't sandbox submodules.

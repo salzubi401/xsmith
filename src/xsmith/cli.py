@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
 from typing import Annotated
 
 import typer
@@ -13,32 +12,32 @@ from xsmith.benchmarks.repo_explore import RepoExploreBench
 from xsmith.benchmarks.testgeneval import TestGenEvalBench
 from xsmith.config import Settings, load_settings
 from xsmith.domain.budget import Budget
-from xsmith.domain.coverage import CoverageMap
-from xsmith.execution.docker_runner import DockerTestRunner
-from xsmith.execution.runner import TestRunner
-from xsmith.execution.subprocess_runner import SubprocessRunner
-from xsmith.exploration.explorer import ExplorationLoop
+from xsmith.domain.progress import Progress
+from xsmith.execution.docker import DockerEvaluator
+from xsmith.execution.evaluator import Evaluator
+from xsmith.execution.subprocess import SubprocessEvaluator
+from xsmith.exploration.explorer import Explorer
 from xsmith.results.schema import RunResult
 from xsmith.results.writer import to_target_result, write_run
-from xsmith.strategies.cov_qvalue import CovQValueStrategy
+from xsmith.strategies.qvalue import QValueStrategy
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 
 
 @app.callback()
 def _root() -> None:
-    """xsmith — curiosity-driven test generation."""
+    """xsmith — curiosity-driven exploration framework."""
 
 
-def _make_runner(runner_kind: str, settings: Settings) -> TestRunner:
-    if runner_kind == "subprocess":
-        return SubprocessRunner(timeout_s=settings.SUBPROCESS_TIMEOUT_S)
-    if runner_kind == "docker":
-        return DockerTestRunner(
+def _make_evaluator(evaluator_kind: str, settings: Settings) -> Evaluator:
+    if evaluator_kind == "subprocess":
+        return SubprocessEvaluator(timeout_s=settings.SUBPROCESS_TIMEOUT_S)
+    if evaluator_kind == "docker":
+        return DockerEvaluator(
             image=settings.DOCKER_IMAGE,
             timeout_s=settings.DOCKER_TIMEOUT_S,
         )
-    raise typer.BadParameter(f"unknown runner: {runner_kind!r}")
+    raise typer.BadParameter(f"unknown evaluator: {evaluator_kind!r}")
 
 
 def _make_benchmark(name: str):
@@ -55,17 +54,17 @@ def explore(
         str, typer.Option("--benchmark", "-b", help="repo_explore | testgeneval")
     ] = "repo_explore",
     targets: Annotated[int, typer.Option("--targets", "-t", help="Max targets to explore")] = 1,
-    budget: Annotated[int | None, typer.Option("--budget", help="Per-target execution budget")] = None,
+    budget: Annotated[int | None, typer.Option("--budget", help="Per-target step budget")] = None,
     output: Annotated[str, typer.Option("--output", "-o", help="Output JSON path")] = "results/run.json",
-    runner: Annotated[
-        str, typer.Option("--runner", help="subprocess (local) | docker")
+    evaluator: Annotated[
+        str, typer.Option("--evaluator", help="subprocess (local) | docker")
     ] = "subprocess",
     model: Annotated[str | None, typer.Option("--model", help="Override model")] = None,
     k: Annotated[int | None, typer.Option("--k", help="Override K candidates per iteration")] = None,
     gamma: Annotated[float | None, typer.Option("--gamma", help="Override Q-value gamma")] = None,
     max_usd: Annotated[float | None, typer.Option("--max-usd", help="Stop a target if cost exceeds this")] = None,
 ) -> None:
-    """Run curiosity-driven test exploration on a benchmark."""
+    """Run curiosity-driven exploration on a benchmark."""
     settings = load_settings()
     if not settings.ANTHROPIC_API_KEY:
         typer.echo("[warning] ANTHROPIC_API_KEY not set; the SDK will likely fail.", err=True)
@@ -77,11 +76,11 @@ def explore(
     eff_model = model or settings.MODEL
     eff_k = k or settings.K
     eff_gamma = gamma if gamma is not None else settings.GAMMA
-    eff_budget = budget if budget is not None else settings.EXEC_BUDGET
+    eff_budget = budget if budget is not None else settings.STEP_BUDGET
 
     bench = _make_benchmark(benchmark)
-    test_runner = _make_runner(runner, settings)
-    strategy = CovQValueStrategy(
+    ev = _make_evaluator(evaluator, settings)
+    strategy = QValueStrategy(
         model=eff_model,
         k=eff_k,
         gamma=eff_gamma,
@@ -90,17 +89,17 @@ def explore(
     )
 
     typer.echo(
-        f"[xsmith] benchmark={benchmark} runner={runner} model={eff_model} "
+        f"[xsmith] benchmark={benchmark} evaluator={evaluator} model={eff_model} "
         f"K={eff_k} gamma={eff_gamma} budget={eff_budget} targets={targets}"
     )
 
     asyncio.run(
         _run(
             bench=bench,
-            test_runner=test_runner,
+            evaluator=ev,
             strategy=strategy,
             targets=targets,
-            exec_budget=eff_budget,
+            step_budget=eff_budget,
             max_usd=max_usd if max_usd is not None else settings.MAX_USD,
             output=output,
             benchmark_name=benchmark,
@@ -114,10 +113,10 @@ def explore(
 async def _run(
     *,
     bench,
-    test_runner: TestRunner,
-    strategy: CovQValueStrategy,
+    evaluator: Evaluator,
+    strategy: QValueStrategy,
     targets: int,
-    exec_budget: int,
+    step_budget: int,
     max_usd: float | None,
     output: str,
     benchmark_name: str,
@@ -133,38 +132,38 @@ async def _run(
         model=model,
         k=k,
         gamma=gamma,
-        exec_budget=exec_budget,
+        step_budget=step_budget,
     )
 
     for tgt in target_list:
-        typer.echo(f"[xsmith] target {tgt.target_id} — discovering branches…")
-        universe = await test_runner.discover_branches(tgt)
-        tgt.branches = universe
-        typer.echo(f"[xsmith] target {tgt.target_id} — {len(universe)} branches total")
+        typer.echo(f"[xsmith] target {tgt.target_id} — enumerating goals…")
+        universe = await evaluator.enumerate_goals(tgt)
+        tgt.goals = universe
+        typer.echo(f"[xsmith] target {tgt.target_id} — {len(universe)} goals total")
 
         budget_obj = Budget(
-            exec_remaining=exec_budget,
+            steps=step_budget,
             enforce_cost=max_usd is not None,
             max_usd=max_usd,
         )
-        coverage = CoverageMap(total=universe)
-        loop = ExplorationLoop(strategy=strategy, runner=test_runner)
+        progress = Progress(all=universe)
+        explorer = Explorer(strategy=strategy, evaluator=evaluator)
 
-        def _print_progress(rec):
+        def _print_progress(step):
             typer.echo(
-                f"  iter {rec.iteration:>2}: outcome={rec.run_result.outcome} "
-                f"new={len(rec.new_branches)} cov={rec.coverage_after}/{rec.coverage_total} "
-                f"cost=${rec.agent_usage.cost_usd:.4f}"
+                f"  step {step.iteration:>2}: outcome={step.evaluation.outcome} "
+                f"new={len(step.new_goals)} hit={step.hit_after}/{step.total} "
+                f"cost=${step.agent_usage.cost_usd:.4f}"
             )
 
-        loop.on_iteration = _print_progress  # type: ignore[assignment]
+        explorer.on_step = _print_progress  # type: ignore[assignment]
 
-        out = await loop.explore(target=tgt, budget=budget_obj, initial_coverage=coverage)
+        out = await explorer.run(target=tgt, budget=budget_obj, initial_progress=progress)
         run.targets.append(to_target_result(out))
         typer.echo(
             f"[xsmith] target {tgt.target_id} done — "
-            f"covered {out.covered_count}/{out.total_count} "
-            f"({out.coverage_fraction:.1%})"
+            f"hit {out.hit_count}/{out.total_count} "
+            f"({out.fraction:.1%})"
         )
 
     write_run(run, output)

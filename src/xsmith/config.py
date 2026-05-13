@@ -5,7 +5,6 @@ CLI flags override env via explicit construction in `cli.py`.
 
 from __future__ import annotations
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,7 +18,7 @@ class Settings(BaseSettings):
 
     ANTHROPIC_API_KEY: str | None = None
     MODEL: str = "claude-sonnet-4-6"
-    EXEC_BUDGET: int = 24
+    STEP_BUDGET: int = 24
     K: int = 5
     GAMMA: float = 0.5
     MAX_TURNS_GEN: int = 8

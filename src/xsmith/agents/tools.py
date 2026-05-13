@@ -1,7 +1,7 @@
 """In-process MCP tools for the agents.
 
 Each agent gets a freshly-built MCP server because the tools close over
-agent-local state (current uncovered branches, recent history, captured
+agent-local state (current missing goals, recent history, captured
 submission). This means tools can't be reused across concurrent agents —
 build them per-call.
 """
@@ -12,8 +12,8 @@ from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-from xsmith.domain.coverage import BranchSet
-from xsmith.domain.test_case import TestResult
+from xsmith.domain.evaluation import Evaluation
+from xsmith.domain.goal import Goals
 
 
 # ----- Generator-side state ------------------------------------------------
@@ -22,35 +22,36 @@ from xsmith.domain.test_case import TestResult
 class GeneratorState:
     """Per-call closure container for a generator agent.
 
-    `submission` is set when the model calls `submit_test`. The AgentRunner
-    reads it once the SDK conversation ends.
+    `submission` is set when the model calls `submit_candidate`. The
+    AgentRunner reads it once the SDK conversation ends.
     """
 
-    def __init__(self, uncovered: BranchSet, history: list[TestResult]):
-        self.uncovered = uncovered
+    def __init__(self, missing: Goals, history: list[Evaluation]):
+        self.missing = missing
         self.history = history
         self.submission: dict[str, Any] | None = None
 
 
 def build_generator_tools(state: GeneratorState):
-    """Build the four tools that close over `state` and the MCP server."""
+    """Build the tools that close over `state` and the MCP server."""
 
     @tool(
-        "view_coverage",
-        "List currently uncovered branch arcs as 'file:src->dst' strings.",
+        "view_progress",
+        "List currently missing goals as 'file:src->dst' strings (for the "
+        "coverage instance, these are the uncovered branch arcs).",
         {},
     )
-    async def view_coverage(args: dict[str, Any]) -> dict[str, Any]:
-        items = sorted(b.key() for b in state.uncovered)
+    async def view_progress(args: dict[str, Any]) -> dict[str, Any]:
+        items = sorted(g.key() for g in state.missing)
         if not items:
-            text = "All branches are already covered."
+            text = "All goals already hit."
         else:
-            text = "Uncovered branches:\n" + "\n".join(items)
+            text = "Missing goals:\n" + "\n".join(items)
         return {"content": [{"type": "text", "text": text}]}
 
     @tool(
         "view_history",
-        "Return the last N test attempts with outcomes and new-coverage counts.",
+        "Return the last N candidate attempts with outcomes and goals-hit counts.",
         {"limit": int},
     )
     async def view_history(args: dict[str, Any]) -> dict[str, Any]:
@@ -62,19 +63,20 @@ def build_generator_tools(state: GeneratorState):
             lines = []
             for i, r in enumerate(items):
                 lines.append(
-                    f"[{i}] outcome={r.outcome} new_branches={len(r.new_branches_covered)} "
-                    f"rationale={r.test_case.rationale[:120]!r}"
+                    f"[{i}] outcome={r.outcome} goals_hit={len(r.goals_hit)} "
+                    f"rationale={r.candidate.rationale[:120]!r}"
                 )
             text = "Recent attempts (oldest first):\n" + "\n".join(lines)
         return {"content": [{"type": "text", "text": text}]}
 
     @tool(
-        "submit_test",
-        "Submit your final test. Call EXACTLY ONCE. Provide a rationale and "
-        "the complete pytest-style script as `code`.",
+        "submit_candidate",
+        "Submit your final candidate. Call EXACTLY ONCE. Provide a rationale "
+        "and the artifact as `code` (for the coverage instance, a complete "
+        "pytest-style test script).",
         {"rationale": str, "code": str},
     )
-    async def submit_test(args: dict[str, Any]) -> dict[str, Any]:
+    async def submit_candidate(args: dict[str, Any]) -> dict[str, Any]:
         state.submission = {
             "rationale": str(args.get("rationale", "")),
             "code": str(args.get("code", "")),
@@ -83,8 +85,8 @@ def build_generator_tools(state: GeneratorState):
 
     server = create_sdk_mcp_server(
         name="xsmith",
-        version="0.1.0",
-        tools=[view_coverage, view_history, submit_test],
+        version="0.2.0",
+        tools=[view_progress, view_history, submit_candidate],
     )
     return server
 
@@ -100,19 +102,19 @@ class ScorerState:
 def build_scorer_tools(state: ScorerState):
     @tool(
         "submit_score",
-        "Submit Q-score components: immediate_branches and future_value.",
-        {"immediate_branches": int, "future_value": int},
+        "Submit Q-score components: immediate_goals and future_value.",
+        {"immediate_goals": int, "future_value": int},
     )
     async def submit_score(args: dict[str, Any]) -> dict[str, Any]:
         state.submission = {
-            "immediate_branches": int(args.get("immediate_branches", 0)),
+            "immediate_goals": int(args.get("immediate_goals", 0)),
             "future_value": int(args.get("future_value", 0)),
         }
         return {"content": [{"type": "text", "text": "Score received."}]}
 
     server = create_sdk_mcp_server(
         name="xsmith",
-        version="0.1.0",
+        version="0.2.0",
         tools=[submit_score],
     )
     return server

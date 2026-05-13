@@ -1,6 +1,6 @@
 """AgentRunner — the single abstraction over `claude-agent-sdk`.
 
-Both `TestGeneratorAgent` and `QValueScorerAgent` go through this. Replacing
+Both `GeneratorAgent` and `ScorerAgent` go through this. Replacing
 `claude-agent-sdk` with the plain `anthropic` SDK later means rewriting this
 one file.
 

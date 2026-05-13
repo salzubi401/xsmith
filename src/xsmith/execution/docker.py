@@ -1,4 +1,4 @@
-"""DockerTestRunner — execute generated tests inside a Docker container.
+"""DockerEvaluator — execute generated candidates inside a Docker container.
 
 Adapted from the upstream `runner/docker_coverage.py` protocol:
 
@@ -9,8 +9,8 @@ Adapted from the upstream `runner/docker_coverage.py` protocol:
      then emit a separator and cat `coverage.json` to stdout.
   5. Host parses everything after the separator as coverage JSON.
 
-The runner is async at the public API level but uses a thread pool under the
-hood (subprocess.run is sync). Docker's daemon serializes work anyway, so
+The evaluator is async at the public API level but uses a thread pool under
+the hood (subprocess.run is sync). Docker's daemon serializes work anyway, so
 async-over-thread is the right pattern here.
 """
 
@@ -25,10 +25,10 @@ import tempfile
 import time
 from pathlib import Path
 
-from xsmith.domain.coverage import Branch, BranchSet
+from xsmith.domain.candidate import Candidate
+from xsmith.domain.evaluation import Evaluation
+from xsmith.domain.goal import Goal, Goals
 from xsmith.domain.target import Target
-from xsmith.domain.test_case import TestCase
-from xsmith.execution.runner import TestRunResult
 
 _SEPARATOR = "===XSMITH_COVERAGE_JSON_START==="
 
@@ -42,8 +42,8 @@ show_missing = False
 """
 
 
-class DockerTestRunner:
-    """Run a candidate test inside an isolated Docker container."""
+class DockerEvaluator:
+    """Run a candidate inside an isolated Docker container."""
 
     def __init__(
         self,
@@ -62,20 +62,20 @@ class DockerTestRunner:
         self.extra_env = extra_env or {}
         self.docker_bin = docker_bin
 
-    async def run(self, test_case: TestCase, target: Target) -> TestRunResult:
-        return await asyncio.to_thread(self._run_sync, test_case, target)
+    async def evaluate(self, candidate: Candidate, target: Target) -> Evaluation:
+        return await asyncio.to_thread(self._run_sync, candidate, target)
 
-    async def discover_branches(self, target: Target) -> BranchSet:
+    async def enumerate_goals(self, target: Target) -> Goals:
         leaf = target.module_path.rsplit(".", 1)[-1]
         import_test = (
             f"import target_pkg.{leaf} as _m\n"
             "def test_import():\n"
             "    assert _m is not None\n"
         )
-        tc = TestCase(code=import_test, rationale="discover branches")
-        return await asyncio.to_thread(self._discover_sync, tc, target)
+        candidate = Candidate(code=import_test, rationale="enumerate goals")
+        return await asyncio.to_thread(self._discover_sync, candidate, target)
 
-    def _discover_sync(self, test_case: TestCase, target: Target) -> BranchSet:
+    def _discover_sync(self, candidate: Candidate, target: Target) -> Goals:
         leaf = target.module_path.rsplit(".", 1)[-1]
         tmp = Path(tempfile.mkdtemp(prefix="xsmith-disc-"))
         try:
@@ -89,7 +89,7 @@ class DockerTestRunner:
                 p.write_text(content)
             tests_dir = tmp / "tests"
             tests_dir.mkdir()
-            (tests_dir / "test_discover.py").write_text(test_case.code)
+            (tests_dir / "test_discover.py").write_text(candidate.code)
             (tmp / ".coveragerc").write_text(_COVERAGERC)
 
             inner = (
@@ -111,7 +111,7 @@ class DockerTestRunner:
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_s)
             except subprocess.TimeoutExpired:
-                return BranchSet()
+                return Goals()
             stdout = proc.stdout or ""
             if _SEPARATOR in stdout:
                 _, after = stdout.split(_SEPARATOR, 1)
@@ -120,27 +120,27 @@ class DockerTestRunner:
             else:
                 cov_json_str = ""
             if not cov_json_str:
-                return BranchSet()
+                return Goals()
             try:
                 data = json.loads(cov_json_str)
             except json.JSONDecodeError:
-                return BranchSet()
+                return Goals()
             target_rel = f"target_pkg/{leaf}.py"
-            branches: list[Branch] = []
+            items: list[Goal] = []
             for path, payload in (data.get("files", {}) or {}).items():
                 if target_rel not in path:
                     continue
                 for key in ("executed_branches", "missing_branches"):
                     for pair in payload.get(key, []) or []:
                         if isinstance(pair, (list, tuple)) and len(pair) == 2:
-                            branches.append(Branch(file=path, src=int(pair[0]), dst=int(pair[1])))
-            return BranchSet.from_iterable(branches)
+                            items.append(Goal(file=path, src=int(pair[0]), dst=int(pair[1])))
+            return Goals.from_iterable(items)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def _run_sync(self, test_case: TestCase, target: Target) -> TestRunResult:
+    def _run_sync(self, candidate: Candidate, target: Target) -> Evaluation:
         leaf = target.module_path.rsplit(".", 1)[-1]
-        rewritten = _rewrite_imports(test_case.code, target.module_path, f"target_pkg.{leaf}")
+        rewritten = _rewrite_imports(candidate.code, target.module_path, f"target_pkg.{leaf}")
 
         tmp = Path(tempfile.mkdtemp(prefix="xsmith-docker-"))
         try:
@@ -195,7 +195,8 @@ class DockerTestRunner:
                     cmd, capture_output=True, text=True, timeout=self.timeout_s
                 )
             except subprocess.TimeoutExpired:
-                return TestRunResult(
+                return Evaluation(
+                    candidate=candidate,
                     outcome="error",
                     stderr=f"docker timeout after {self.timeout_s}s",
                     duration_s=time.monotonic() - start,
@@ -215,7 +216,7 @@ class DockerTestRunner:
                 cov_json_str = ""
 
             target_rel = f"target_pkg/{leaf}.py"
-            covered = _parse_executed(cov_json_str, target_rel)
+            goals_hit = _parse_executed(cov_json_str, target_rel)
 
             rc = proc.returncode
             if rc == 0:
@@ -225,33 +226,34 @@ class DockerTestRunner:
             else:
                 outcome = "error"
 
-            return TestRunResult(
+            return Evaluation(
+                candidate=candidate,
                 outcome=outcome,
                 stdout=test_output,
                 stderr=stderr,
                 duration_s=duration,
-                branches_covered=covered,
+                goals_hit=goals_hit,
             )
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _parse_executed(cov_json_str: str, target_rel: str) -> BranchSet:
+def _parse_executed(cov_json_str: str, target_rel: str) -> Goals:
     if not cov_json_str:
-        return BranchSet()
+        return Goals()
     try:
         data = json.loads(cov_json_str)
     except json.JSONDecodeError:
-        return BranchSet()
+        return Goals()
     files = data.get("files", {}) or {}
-    branches: list[Branch] = []
+    items: list[Goal] = []
     for path, payload in files.items():
         if target_rel not in path:
             continue
         for pair in payload.get("executed_branches", []) or []:
             if isinstance(pair, (list, tuple)) and len(pair) == 2:
-                branches.append(Branch(file=path, src=int(pair[0]), dst=int(pair[1])))
-    return BranchSet.from_iterable(branches)
+                items.append(Goal(file=path, src=int(pair[0]), dst=int(pair[1])))
+    return Goals.from_iterable(items)
 
 
 def _rewrite_imports(code: str, original: str, replacement: str) -> str:

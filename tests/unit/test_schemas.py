@@ -1,12 +1,12 @@
 import json
 
 from xsmith.domain.budget import Budget
-from xsmith.domain.coverage import Branch, BranchSet
+from xsmith.domain.goal import Goal, Goals
 from xsmith.domain.target import Target
 from xsmith.results.schema import (
     AgentUsageRecord,
-    IterationResult,
     RunResult,
+    StepResult,
     TargetResult,
 )
 
@@ -15,29 +15,29 @@ def test_target_serialization_roundtrip():
     t = Target(
         target_id="x", module_path="a.b",
         source="def f(): pass",
-        branches=BranchSet.from_iterable([Branch(file="a.py", src=1, dst=2)]),
+        goals=Goals.from_iterable([Goal(file="a.py", src=1, dst=2)]),
     )
     js = t.model_dump_json()
     parsed = Target.model_validate_json(js)
     assert parsed.target_id == "x"
-    assert len(parsed.branches) == 1
+    assert len(parsed.goals) == 1
 
 
 def test_budget_consumes_and_exhausts():
-    b = Budget(exec_remaining=2)
+    b = Budget(steps=2)
     assert not b.exhausted
-    b.consume_execution()
-    b.consume_execution()
-    assert b.exec_remaining == 0
+    b.consume_step()
+    b.consume_step()
+    assert b.steps == 0
     assert b.exhausted
 
 
 def test_budget_cost_gating_only_when_enforced():
-    b = Budget(exec_remaining=10, enforce_cost=True, max_usd=1.0)
+    b = Budget(steps=10, enforce_cost=True, max_usd=1.0)
     b.record_usage(usd=2.0)
     assert b.exhausted
 
-    b2 = Budget(exec_remaining=10, enforce_cost=False, max_usd=1.0)
+    b2 = Budget(steps=10, enforce_cost=False, max_usd=1.0)
     b2.record_usage(usd=2.0)
     assert not b2.exhausted
 
@@ -47,15 +47,15 @@ def test_run_result_totals():
         tokens_in=10, tokens_out=20, tokens_cache_read=5,
         tokens_cache_creation=3, cost_usd=0.01,
     )
-    itr = IterationResult(
-        iteration=1, outcome="pass", duration_s=0.1, new_branches=2,
-        coverage_after=2, coverage_total=10,
-        test_rationale="ok", test_code="def test_x(): pass",
+    step = StepResult(
+        iteration=1, outcome="pass", duration_s=0.1, new_goals=2,
+        hit_after=2, total=10,
+        candidate_rationale="ok", candidate_code="def test_x(): pass",
         agent_usage=usage,
     )
-    tr = TargetResult(target_id="t", module_path="m", iterations=[itr, itr])
+    tr = TargetResult(target_id="t", module_path="m", steps=[step, step])
     rr = RunResult(
-        benchmark="x", model="m", k=5, gamma=0.5, exec_budget=24,
+        benchmark="x", model="m", k=5, gamma=0.5, step_budget=24,
         targets=[tr],
     )
     assert rr.total_cost_usd == 0.02

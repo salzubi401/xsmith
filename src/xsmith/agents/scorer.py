@@ -1,4 +1,4 @@
-"""QValueScorerAgent — produces Q-score components for a candidate test."""
+"""ScorerAgent — produces Q-score components for a candidate."""
 
 from __future__ import annotations
 
@@ -8,24 +8,24 @@ from xsmith.agents.base import AgentRunner, AgentUsage
 from xsmith.agents.isolation import build_options
 from xsmith.agents.prompts import SCORER_SYSTEM
 from xsmith.agents.tools import ScorerState, build_scorer_tools
-from xsmith.domain.coverage import BranchSet
+from xsmith.domain.candidate import Candidate
+from xsmith.domain.goal import Goals
 from xsmith.domain.target import Target
-from xsmith.domain.test_case import TestCase
 
 
 class QScore(BaseModel):
-    immediate_branches: int = Field(ge=0)
+    immediate_goals: int = Field(ge=0)
     future_value: int = Field(ge=0, le=10)
     gamma: float = 0.5
 
     @property
     def q(self) -> float:
-        return float(self.immediate_branches) + self.gamma * float(self.future_value)
+        return float(self.immediate_goals) + self.gamma * float(self.future_value)
 
 
-def _scorer_user_prompt(target: Target, uncovered: BranchSet, candidate: TestCase) -> str:
-    branch_lines = sorted(b.key() for b in uncovered)
-    branches_text = "\n".join(branch_lines) if branch_lines else "(none — all covered)"
+def _scorer_user_prompt(target: Target, missing: Goals, candidate: Candidate) -> str:
+    goal_lines = sorted(g.key() for g in missing)
+    goals_text = "\n".join(goal_lines) if goal_lines else "(none — all hit)"
     return f"""\
 # Target module
 module_path: {target.module_path}
@@ -34,21 +34,21 @@ module_path: {target.module_path}
 {target.source}
 ```
 
-# Currently uncovered branches
-{branches_text}
+# Currently missing goals
+{goals_text}
 
-# Candidate test
+# Candidate
 Rationale: {candidate.rationale}
 
 ```python
 {candidate.code}
 ```
 
-Estimate `immediate_branches` and `future_value`, then call `submit_score`.
+Estimate `immediate_goals` and `future_value`, then call `submit_score`.
 """
 
 
-class QValueScorerAgent:
+class ScorerAgent:
     """Wrap AgentRunner to produce a QScore for a single candidate."""
 
     def __init__(
@@ -68,8 +68,8 @@ class QValueScorerAgent:
         self,
         *,
         target: Target,
-        uncovered: BranchSet,
-        candidate: TestCase,
+        missing: Goals,
+        candidate: Candidate,
     ) -> tuple[QScore | None, AgentUsage]:
         state = ScorerState()
         server = build_scorer_tools(state)
@@ -80,13 +80,13 @@ class QValueScorerAgent:
             model=self.model,
             max_turns=self.max_turns,
         )
-        prompt = _scorer_user_prompt(target, uncovered, candidate)
+        prompt = _scorer_user_prompt(target, missing, candidate)
         submission, usage = await self.runner.run(options=options, user_prompt=prompt)
         if submission is None:
             return None, usage
         try:
             score = QScore(
-                immediate_branches=submission["immediate_branches"],
+                immediate_goals=submission["immediate_goals"],
                 future_value=submission["future_value"],
                 gamma=self.gamma,
             )

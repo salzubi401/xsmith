@@ -1,16 +1,16 @@
-"""ExplorationLoop — depends only on the Strategy + Runner Protocols.
+"""Explorer — depends only on the Strategy + Evaluator Protocols.
 
 For one Target:
 
   while not budget.exhausted:
-      test_case, agent_usage = strategy.propose(target, coverage, history)
-      run_result               = runner.run(test_case, target)
-      delta                    = coverage.update(run_result.branches_covered)
-      record iteration; append to history; consume one execution
+      candidate, agent_usage = strategy.propose(target, progress, history)
+      evaluation             = evaluator.evaluate(candidate, target)
+      new_goals              = progress.update(evaluation.goals_hit)
+      record Step; append to history; consume one step
 
 Termination:
   - budget exhausted (default), OR
-  - all branches covered (early stop).
+  - all goals hit (early stop).
 """
 
 from __future__ import annotations
@@ -20,77 +20,79 @@ from typing import Awaitable, Callable
 
 from xsmith.agents.base import AgentUsage
 from xsmith.domain.budget import Budget
-from xsmith.domain.coverage import BranchSet, CoverageMap
+from xsmith.domain.candidate import Candidate
+from xsmith.domain.evaluation import Evaluation
+from xsmith.domain.goal import Goals
+from xsmith.domain.progress import Progress
 from xsmith.domain.target import Target
-from xsmith.domain.test_case import TestCase, TestResult
-from xsmith.execution.runner import TestRunner, TestRunResult
-from xsmith.strategies.base import GenerationStrategy
+from xsmith.execution.evaluator import Evaluator
+from xsmith.strategies.base import Strategy
 
 
 @dataclass
-class IterationRecord:
+class Step:
     iteration: int
-    test_case: TestCase
-    run_result: TestRunResult
-    new_branches: BranchSet
-    coverage_after: int
-    coverage_total: int
+    candidate: Candidate
+    evaluation: Evaluation
+    new_goals: Goals
+    hit_after: int
+    total: int
     agent_usage: AgentUsage
 
 
 @dataclass
-class TargetExplorationResult:
+class ExplorationResult:
     target: Target
-    iterations: list[IterationRecord] = field(default_factory=list)
-    final_coverage: CoverageMap | None = None
+    steps: list[Step] = field(default_factory=list)
+    final_progress: Progress | None = None
 
     @property
-    def covered_count(self) -> int:
-        return len(self.final_coverage.covered) if self.final_coverage else 0
+    def hit_count(self) -> int:
+        return len(self.final_progress.hit) if self.final_progress else 0
 
     @property
     def total_count(self) -> int:
-        return len(self.final_coverage.total) if self.final_coverage else 0
+        return len(self.final_progress.all) if self.final_progress else 0
 
     @property
-    def coverage_fraction(self) -> float:
-        return self.final_coverage.fraction if self.final_coverage else 0.0
+    def fraction(self) -> float:
+        return self.final_progress.fraction if self.final_progress else 0.0
 
 
-class ExplorationLoop:
-    """Drive a single target's exploration with injected strategy + runner."""
+class Explorer:
+    """Drive a single target's exploration with injected strategy + evaluator."""
 
     def __init__(
         self,
         *,
-        strategy: GenerationStrategy,
-        runner: TestRunner,
-        on_iteration: Callable[[IterationRecord], Awaitable[None] | None] | None = None,
+        strategy: Strategy,
+        evaluator: Evaluator,
+        on_step: Callable[[Step], Awaitable[None] | None] | None = None,
     ):
         self.strategy = strategy
-        self.runner = runner
-        self.on_iteration = on_iteration
+        self.evaluator = evaluator
+        self.on_step = on_step
 
-    async def explore(
+    async def run(
         self,
         *,
         target: Target,
         budget: Budget,
-        initial_coverage: CoverageMap | None = None,
-    ) -> TargetExplorationResult:
-        coverage = initial_coverage or CoverageMap(total=target.branches)
-        if coverage.total == BranchSet() and target.branches != BranchSet():
-            coverage = CoverageMap(total=target.branches, covered=coverage.covered)
+        initial_progress: Progress | None = None,
+    ) -> ExplorationResult:
+        progress = initial_progress or Progress(all=target.goals)
+        if progress.all == Goals() and target.goals != Goals():
+            progress = Progress(all=target.goals, hit=progress.hit)
 
-        history: list[TestResult] = []
-        result = TargetExplorationResult(target=target)
+        history: list[Evaluation] = []
+        result = ExplorationResult(target=target)
         i = 0
         while not budget.exhausted:
-            if len(coverage.total) > 0 and len(coverage.uncovered) == 0:
+            if len(progress.all) > 0 and len(progress.missing) == 0:
                 break
             i += 1
-            test_case, agent_usage = await self.strategy.propose(
-                target=target, coverage=coverage, history=history
+            candidate, agent_usage = await self.strategy.propose(
+                target=target, progress=progress, history=history
             )
             budget.record_usage(
                 tokens_in=agent_usage.tokens_in,
@@ -100,43 +102,54 @@ class ExplorationLoop:
                 usd=agent_usage.cost_usd,
             )
 
-            if not test_case.code:
-                run_result = TestRunResult(
+            if not candidate.code:
+                evaluation = Evaluation(
+                    candidate=candidate,
                     outcome="error",
-                    stderr="empty test case (strategy failed)",
+                    stderr="empty candidate (strategy failed)",
                 )
-                new = BranchSet()
+                new_goals = Goals()
             else:
-                run_result = await self.runner.run(test_case, target)
-                new = coverage.update(run_result.branches_covered)
+                evaluation = await self.evaluator.evaluate(candidate, target)
+                new_goals = progress.update(evaluation.goals_hit)
 
-            test_result = TestResult(
-                test_case=test_case,
-                outcome=run_result.outcome,
-                stdout=run_result.stdout,
-                stderr=run_result.stderr,
-                duration_s=run_result.duration_s,
-                branches_covered=run_result.branches_covered,
-                new_branches_covered=new,
-            )
-            history.append(test_result)
+            history.append(evaluation)
 
-            rec = IterationRecord(
+            step = Step(
                 iteration=i,
-                test_case=test_case,
-                run_result=run_result,
-                new_branches=new,
-                coverage_after=len(coverage.covered),
-                coverage_total=len(coverage.total),
+                candidate=candidate,
+                evaluation=evaluation,
+                new_goals=new_goals,
+                hit_after=len(progress.hit),
+                total=len(progress.all),
                 agent_usage=agent_usage,
             )
-            result.iterations.append(rec)
-            if self.on_iteration is not None:
-                maybe = self.on_iteration(rec)
+            result.steps.append(step)
+            if self.on_step is not None:
+                maybe = self.on_step(step)
                 if hasattr(maybe, "__await__"):
                     await maybe  # type: ignore[func-returns-value]
 
-            budget.consume_execution()
+            budget.consume_step()
 
-        result.final_coverage = coverage
+        result.final_progress = progress
         return result
+
+
+async def explore(
+    *,
+    target: Target,
+    strategy: Strategy,
+    evaluator: Evaluator,
+    budget: Budget,
+    on_step: Callable[[Step], Awaitable[None] | None] | None = None,
+    initial_progress: Progress | None = None,
+) -> ExplorationResult:
+    """Sugar for `Explorer(strategy=..., evaluator=..., on_step=...).run(...)`.
+
+    Single-target by design; for multi-target orchestration use the CLI or
+    call `explore()` in a loop.
+    """
+    return await Explorer(
+        strategy=strategy, evaluator=evaluator, on_step=on_step
+    ).run(target=target, budget=budget, initial_progress=initial_progress)

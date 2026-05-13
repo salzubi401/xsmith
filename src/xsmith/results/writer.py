@@ -1,4 +1,4 @@
-"""Convert ExplorationLoop output → RunResult → JSON on disk."""
+"""Convert Explorer output → RunResult → JSON on disk."""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ import json
 from pathlib import Path
 
 from xsmith.agents.base import AgentUsage
-from xsmith.exploration.explorer import IterationRecord, TargetExplorationResult
+from xsmith.exploration.explorer import ExplorationResult, Step
 from xsmith.results.schema import (
     AgentUsageRecord,
-    IterationResult,
     RunResult,
+    StepResult,
     TargetResult,
 )
 
@@ -27,28 +27,28 @@ def _agent_usage_to_record(u: AgentUsage) -> AgentUsageRecord:
     )
 
 
-def _iteration_to_record(rec: IterationRecord) -> IterationResult:
-    return IterationResult(
-        iteration=rec.iteration,
-        outcome=rec.run_result.outcome,
-        duration_s=rec.run_result.duration_s,
-        new_branches=len(rec.new_branches),
-        coverage_after=rec.coverage_after,
-        coverage_total=rec.coverage_total,
-        test_rationale=rec.test_case.rationale,
-        test_code=rec.test_case.code,
-        agent_usage=_agent_usage_to_record(rec.agent_usage),
+def _step_to_record(step: Step) -> StepResult:
+    return StepResult(
+        iteration=step.iteration,
+        outcome=step.evaluation.outcome,
+        duration_s=step.evaluation.duration_s,
+        new_goals=len(step.new_goals),
+        hit_after=step.hit_after,
+        total=step.total,
+        candidate_rationale=step.candidate.rationale,
+        candidate_code=step.candidate.code,
+        agent_usage=_agent_usage_to_record(step.agent_usage),
     )
 
 
-def to_target_result(out: TargetExplorationResult) -> TargetResult:
+def to_target_result(out: ExplorationResult) -> TargetResult:
     return TargetResult(
         target_id=out.target.target_id,
         module_path=out.target.module_path,
-        iterations=[_iteration_to_record(r) for r in out.iterations],
-        final_covered=out.covered_count,
+        steps=[_step_to_record(s) for s in out.steps],
+        final_hit=out.hit_count,
         final_total=out.total_count,
-        final_fraction=out.coverage_fraction,
+        final_fraction=out.fraction,
     )
 
 

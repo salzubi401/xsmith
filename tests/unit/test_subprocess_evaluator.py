@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from xsmith.domain.coverage import BranchSet
+from xsmith.domain.candidate import Candidate
+from xsmith.domain.goal import Goals
 from xsmith.domain.target import Target
-from xsmith.domain.test_case import TestCase as XTestCase
-from xsmith.execution.docker_runner import _rewrite_imports as docker_rewrite_imports
-from xsmith.execution.subprocess_runner import (
-    SubprocessRunner,
+from xsmith.execution.docker import _rewrite_imports as docker_rewrite_imports
+from xsmith.execution.subprocess import (
+    SubprocessEvaluator,
     _rewrite_imports as subprocess_rewrite_imports,
 )
 
@@ -29,15 +29,15 @@ def _target() -> Target:
 
 
 @pytest.mark.asyncio
-async def test_subprocess_runner_executes_test_and_reports_target_branches():
-    runner = SubprocessRunner(timeout_s=10)
+async def test_subprocess_evaluator_executes_candidate_and_reports_goals_hit():
+    evaluator = SubprocessEvaluator(timeout_s=10)
     target = _target()
 
-    discovered = await runner.discover_branches(target)
+    discovered = await evaluator.enumerate_goals(target)
     assert len(discovered) >= 2
 
-    result = await runner.run(
-        XTestCase(
+    result = await evaluator.evaluate(
+        Candidate(
             code=(
                 "from sample_mod import classify\n\n"
                 "def test_positive():\n"
@@ -49,17 +49,17 @@ async def test_subprocess_runner_executes_test_and_reports_target_branches():
     )
 
     assert result.outcome == "pass"
-    assert len(result.branches_covered) > 0
-    assert len(result.branches_covered - discovered) == 0
+    assert len(result.goals_hit) > 0
+    assert len(result.goals_hit - discovered) == 0
 
 
 @pytest.mark.asyncio
-async def test_subprocess_runner_distinguishes_failures_from_errors():
-    runner = SubprocessRunner(timeout_s=10)
+async def test_subprocess_evaluator_distinguishes_failures_from_errors():
+    evaluator = SubprocessEvaluator(timeout_s=10)
     target = _target()
 
-    failed = await runner.run(
-        XTestCase(
+    failed = await evaluator.evaluate(
+        Candidate(
             code=(
                 "from sample_mod import classify\n\n"
                 "def test_wrong_assertion():\n"
@@ -70,8 +70,8 @@ async def test_subprocess_runner_distinguishes_failures_from_errors():
     )
     assert failed.outcome == "fail"
 
-    errored = await runner.run(
-        XTestCase(code="import definitely_missing_module\n\n\ndef test_never_runs():\n    pass\n"),
+    errored = await evaluator.evaluate(
+        Candidate(code="import definitely_missing_module\n\n\ndef test_never_runs():\n    pass\n"),
         target,
     )
     assert errored.outcome == "error"
@@ -99,13 +99,13 @@ text = "import sample_mod"
 
 
 @pytest.mark.asyncio
-async def test_subprocess_runner_timeout_reports_error():
-    runner = SubprocessRunner(timeout_s=0.1)
-    result = await runner.run(
-        XTestCase(code="def test_hangs():\n    while True:\n        pass\n"),
+async def test_subprocess_evaluator_timeout_reports_error():
+    evaluator = SubprocessEvaluator(timeout_s=0.1)
+    result = await evaluator.evaluate(
+        Candidate(code="def test_hangs():\n    while True:\n        pass\n"),
         _target(),
     )
 
     assert result.outcome == "error"
     assert "timeout after" in result.stderr
-    assert result.branches_covered == BranchSet()
+    assert result.goals_hit == Goals()
